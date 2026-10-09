@@ -1,4 +1,4 @@
-package azurenodeclass
+package nodeclassstatus
 
 import (
 	"testing"
@@ -11,8 +11,6 @@ import (
 	"github.com/awslabs/operatorpkg/status"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	azurekarpenterv1beta1 "github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
 )
 
 func TestSyncConditions(t *testing.T) {
@@ -36,26 +34,26 @@ func TestSyncConditions(t *testing.T) {
 		Reason:  openshiftkarpenterv1.ConditionReasonAsExpected,
 		Message: "Version skew is within the supported policy",
 	}
-	upstreamSubnetsReady := status.Condition{
-		Type:               azurekarpenterv1beta1.ConditionTypeSubnetsReady,
+	providerSubnetsReady := status.Condition{
+		Type:               "SubnetsReady",
 		Status:             metav1.ConditionTrue,
-		Reason:             azurekarpenterv1beta1.ConditionTypeSubnetsReady,
+		Reason:             "SubnetsReady",
 		ObservedGeneration: 1,
 	}
-	upstreamImagesNotReady := status.Condition{
-		Type:               azurekarpenterv1beta1.ConditionTypeImagesReady,
+	providerImagesNotReady := status.Condition{
+		Type:               "ImagesReady",
 		Status:             metav1.ConditionFalse,
 		Reason:             "ImagesNotFound",
 		Message:            "no images found",
 		ObservedGeneration: 1,
 	}
-	upstreamReady := status.Condition{
+	providerReady := status.Condition{
 		Type:               openshiftkarpenterv1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             openshiftkarpenterv1.ConditionTypeReady,
 		ObservedGeneration: 1,
 	}
-	upstreamNotReady := status.Condition{
+	providerNotReady := status.Condition{
 		Type:               openshiftkarpenterv1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             "UnhealthyDependents",
@@ -65,31 +63,31 @@ func TestSyncConditions(t *testing.T) {
 
 	tests := map[string]struct {
 		conditions         []metav1.Condition
-		upstreamConditions []status.Condition
+		providerConditions []status.Condition
 		want               []metav1.Condition
 	}{
-		"When the version is resolved, it should copy the AKSNodeClass conditions including Ready": {
+		"When the version is resolved, it should copy the provider NodeClass conditions including Ready": {
 			conditions:         []metav1.Condition{versionResolved, supportedVersionSkew},
-			upstreamConditions: []status.Condition{upstreamSubnetsReady, upstreamReady},
+			providerConditions: []status.Condition{providerSubnetsReady, providerReady},
 			want: []metav1.Condition{
 				versionResolved,
 				supportedVersionSkew,
-				metav1.Condition(upstreamSubnetsReady),
-				metav1.Condition(upstreamReady),
+				metav1.Condition(providerSubnetsReady),
+				metav1.Condition(providerReady),
 			},
 		},
-		"When the AKSNodeClass is not ready, it should copy its Ready condition": {
+		"When the provider NodeClass is not ready, it should copy its Ready condition": {
 			conditions:         []metav1.Condition{versionResolved},
-			upstreamConditions: []status.Condition{upstreamImagesNotReady, upstreamNotReady},
+			providerConditions: []status.Condition{providerImagesNotReady, providerNotReady},
 			want: []metav1.Condition{
 				versionResolved,
-				metav1.Condition(upstreamImagesNotReady),
-				metav1.Condition(upstreamNotReady),
+				metav1.Condition(providerImagesNotReady),
+				metav1.Condition(providerNotReady),
 			},
 		},
 		"When the version is not resolved, it should set Ready to False with the resolution failure": {
 			conditions:         []metav1.Condition{versionNotResolved},
-			upstreamConditions: []status.Condition{upstreamReady},
+			providerConditions: []status.Condition{providerReady},
 			want: []metav1.Condition{
 				versionNotResolved,
 				{
@@ -101,12 +99,12 @@ func TestSyncConditions(t *testing.T) {
 				},
 			},
 		},
-		"When neither the version nor the AKSNodeClass are ready, it should prioritize version resolution": {
+		"When neither the version nor the provider NodeClass are ready, it should prioritize version resolution": {
 			conditions:         []metav1.Condition{versionNotResolved},
-			upstreamConditions: []status.Condition{upstreamImagesNotReady, upstreamNotReady},
+			providerConditions: []status.Condition{providerImagesNotReady, providerNotReady},
 			want: []metav1.Condition{
 				versionNotResolved,
-				metav1.Condition(upstreamImagesNotReady),
+				metav1.Condition(providerImagesNotReady),
 				{
 					Type:               openshiftkarpenterv1.ConditionTypeReady,
 					Status:             metav1.ConditionFalse,
@@ -117,7 +115,7 @@ func TestSyncConditions(t *testing.T) {
 			},
 		},
 		"When the version resolution is unknown, it should set Ready to False": {
-			upstreamConditions: []status.Condition{upstreamReady},
+			providerConditions: []status.Condition{providerReady},
 			want: []metav1.Condition{
 				{
 					Type:               openshiftkarpenterv1.ConditionTypeReady,
@@ -128,7 +126,7 @@ func TestSyncConditions(t *testing.T) {
 				},
 			},
 		},
-		"When the AKSNodeClass has no conditions yet, it should keep the existing conditions": {
+		"When the provider NodeClass has no conditions yet, it should keep the existing conditions": {
 			conditions: []metav1.Condition{versionResolved, supportedVersionSkew},
 			want:       []metav1.Condition{versionResolved, supportedVersionSkew},
 		},
@@ -137,7 +135,7 @@ func TestSyncConditions(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			g := NewWithT(t)
-			got := syncConditions(tc.conditions, tc.upstreamConditions, generation)
+			got := SyncConditions(tc.conditions, tc.providerConditions, generation)
 			g.Expect(withoutTransitionTimes(got)).To(Equal(tc.want))
 		})
 	}
@@ -152,20 +150,20 @@ func TestSyncConditionsDoesNotModifyItsInput(t *testing.T) {
 	}}
 	original := append([]metav1.Condition(nil), conditions...)
 
-	syncConditions(conditions, []status.Condition{{Type: azurekarpenterv1beta1.ConditionTypeSubnetsReady, Status: metav1.ConditionTrue, Reason: "SubnetsReady"}}, 1)
+	SyncConditions(conditions, []status.Condition{{Type: "SubnetsReady", Status: metav1.ConditionTrue, Reason: "SubnetsReady"}}, 1)
 
 	g.Expect(conditions).To(Equal(original))
 }
 
 func TestSyncConditionsKeepsTransitionTimes(t *testing.T) {
 	unchanged := metav1.NewTime(time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC))
-	upstreamTransition := metav1.NewTime(time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC))
+	providerTransition := metav1.NewTime(time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC))
 
 	tests := map[string]struct {
 		conditions         []metav1.Condition
-		upstreamConditions []status.Condition
+		providerConditions []status.Condition
 	}{
-		"When the version stays unresolved while the AKSNodeClass is ready, it should not change the Ready condition": {
+		"When the version stays unresolved while the provider NodeClass is ready, it should not change the Ready condition": {
 			conditions: []metav1.Condition{{
 				Type:               openshiftkarpenterv1.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
@@ -174,14 +172,14 @@ func TestSyncConditionsKeepsTransitionTimes(t *testing.T) {
 				ObservedGeneration: 1,
 				LastTransitionTime: unchanged,
 			}},
-			upstreamConditions: []status.Condition{{
+			providerConditions: []status.Condition{{
 				Type:               openshiftkarpenterv1.ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             openshiftkarpenterv1.ConditionTypeReady,
-				LastTransitionTime: upstreamTransition,
+				LastTransitionTime: providerTransition,
 			}},
 		},
-		"When the version is resolved and the AKSNodeClass stays ready, it should not change the Ready condition": {
+		"When the version is resolved and the provider NodeClass stays ready, it should not change the Ready condition": {
 			conditions: []metav1.Condition{
 				{
 					Type:               openshiftkarpenterv1.ConditionTypeVersionResolved,
@@ -196,11 +194,11 @@ func TestSyncConditionsKeepsTransitionTimes(t *testing.T) {
 					LastTransitionTime: unchanged,
 				},
 			},
-			upstreamConditions: []status.Condition{{
+			providerConditions: []status.Condition{{
 				Type:               openshiftkarpenterv1.ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             openshiftkarpenterv1.ConditionTypeReady,
-				LastTransitionTime: upstreamTransition,
+				LastTransitionTime: providerTransition,
 			}},
 		},
 	}
@@ -208,7 +206,7 @@ func TestSyncConditionsKeepsTransitionTimes(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			g := NewWithT(t)
-			g.Expect(syncConditions(tc.conditions, tc.upstreamConditions, 1)).To(Equal(tc.conditions))
+			g.Expect(SyncConditions(tc.conditions, tc.providerConditions, 1)).To(Equal(tc.conditions))
 		})
 	}
 }
