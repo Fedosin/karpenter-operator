@@ -3,6 +3,8 @@ package hypershift
 import (
 	configv1 "github.com/openshift/api/config/v1"
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 )
 
 // WaitsForControlPlaneUpgrade reports whether a NodeClass with the given spec.version waits for the control plane
@@ -31,4 +33,10 @@ func isControlPlaneUpgrading(hcp *hyperv1beta1.HostedControlPlane) bool {
 	}
 
 	return false
+}
+
+// ControlPlaneVersionChanged reports whether the control plane version status differs between two HostedControlPlanes,
+// e.g. because an upgrade started or completed.
+func ControlPlaneVersionChanged(oldHCP, newHCP *hyperv1beta1.HostedControlPlane) bool {
+	return !equality.Semantic.DeepEqual(oldHCP.Status.ControlPlaneVersion, newHCP.Status.ControlPlaneVersion)
 }

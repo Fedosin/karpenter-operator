@@ -76,7 +76,7 @@ func hcpPredicate() predicate.Predicate {
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldHCP, oldOK := e.ObjectOld.(*hyperv1beta1.HostedControlPlane)
 			newHCP, newOK := e.ObjectNew.(*hyperv1beta1.HostedControlPlane)
-			return oldOK && newOK && !equality.Semantic.DeepEqual(oldHCP.Status.ControlPlaneVersion, newHCP.Status.ControlPlaneVersion)
+			return oldOK && newOK && hypershift.ControlPlaneVersionChanged(oldHCP, newHCP)
 		},
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return false },

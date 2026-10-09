@@ -103,9 +103,9 @@ func TestReconcile(t *testing.T) {
 		expectedResult    ctrl.Result
 		expectedHosted    func(g Gomega, hostedClient client.Client)
 	}{
-		"When no HostedControlPlane exists, it should requeue": {
+		"When no HostedControlPlane exists, it should not create the EC2NodeClass": {
 			hostedObjects:  []client.Object{newOpenshiftEC2NodeClass(false)},
-			expectedResult: ctrl.Result{RequeueAfter: 5 * time.Second},
+			expectedResult: ctrl.Result{},
 			expectedHosted: func(g Gomega, hostedClient client.Client) {
 				err := hostedClient.Get(t.Context(), client.ObjectKey{Name: nodeClassName}, &awskarpenterv1.EC2NodeClass{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
@@ -1425,6 +1425,16 @@ func TestHCPPredicate(t *testing.T) {
 		return hcp
 	}
 	costCenter := hyperv1beta1.AWSClusterResourceTag{Key: "cost-center", Value: "1234"}
+	upgradingHCP := newHCP("example-4x7kq-worker")
+	upgradingHCP.Status.ControlPlaneVersion = hyperv1beta1.ControlPlaneVersionStatus{
+		Desired: configv1.Release{Image: "quay.io/openshift-release-dev/ocp-release:4.22.1-x86_64"},
+		History: []hyperv1beta1.ControlPlaneUpdateHistory{
+			{State: configv1.PartialUpdate, Image: "quay.io/openshift-release-dev/ocp-release:4.22.1-x86_64"},
+			{State: configv1.CompletedUpdate, Image: "quay.io/openshift-release-dev/ocp-release:4.21.10-x86_64"},
+		},
+	}
+	upgradedHCP := upgradingHCP.DeepCopy()
+	upgradedHCP.Status.ControlPlaneVersion.History[0].State = configv1.CompletedUpdate
 
 	tests := map[string]struct {
 		oldHCP         *hyperv1beta1.HostedControlPlane
@@ -1453,6 +1463,11 @@ func TestHCPPredicate(t *testing.T) {
 			newHCP:         newHCP("", costCenter),
 			expectedResult: true,
 		},
+		"When a control plane upgrade completes, it should accept the event": {
+			oldHCP:         upgradingHCP,
+			newHCP:         upgradedHCP,
+			expectedResult: true,
+		},
 		"When neither the instance profile nor the resource tags change, it should reject the event": {
 			oldHCP:         newHCP("example-4x7kq-worker", costCenter),
 			newHCP:         newHCP("example-4x7kq-worker", costCenter),
@@ -1470,6 +1485,12 @@ func TestHCPPredicate(t *testing.T) {
 			g.Expect(result).To(Equal(tc.expectedResult))
 		})
 	}
+
+	t.Run("When a HostedControlPlane is created, it should accept the event", func(t *testing.T) {
+		g := NewWithT(t)
+		r := &EC2NodeClassReconciler{}
+		g.Expect(r.hcpPredicate().Create(event.CreateEvent{Object: newHCP("example-4x7kq-worker")})).To(BeTrue())
+	})
 }
 
 func TestReconcileKarpenterSubnetsConfigMap(t *testing.T) {

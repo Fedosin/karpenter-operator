@@ -100,7 +100,7 @@ func (r *EC2NodeClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{},
 			hypershift.EnqueueNodeClassForUserDataSecret(),
 			builder.WithPredicates(hypershift.KarpenterSecretPredicate())).
-		// Watch HostedControlPlane for instance profile and resource tag changes
+		// Watch HostedControlPlane for instance profile, resource tag and control plane version changes
 		Watches(&hyperv1beta1.HostedControlPlane{},
 			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
 			builder.WithPredicates(r.hcpPredicate())).
@@ -113,8 +113,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	hcp, err := hypershift.GetHostedControlPlane(ctx, r.managementClient, r.namespace)
 	if err != nil {
 		if errors.Is(err, hypershift.ErrHostedControlPlaneNotFound) {
-			log.V(1).Info("HostedControlPlane not found, requeueing")
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -211,10 +210,6 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// We requeue an un-pinned NodeClass if the control plane is in the middle of an upgrade to eventually ensure the NodeClass is upgraded to the new release image.
-	if hypershift.WaitsForControlPlaneUpgrade(hcp, openshiftEC2NodeClass.Spec.Version) {
-		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
-	}
 	return ctrl.Result{}, nil
 }
 
@@ -549,27 +544,17 @@ func (r *EC2NodeClassReconciler) reconcileVAP(ctx context.Context) error {
 
 // hcpPredicate filters HostedControlPlane events to changes that affect EC2NodeClasses.
 func (r *EC2NodeClassReconciler) hcpPredicate() predicate.Predicate {
-	filterHCP := func(obj client.Object) bool {
-		if hcp, ok := obj.(*hyperv1beta1.HostedControlPlane); ok {
-			// Trigger if the annotation exists
-			if _, exists := hcp.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]; exists {
-				return true
-			}
-		}
-		return false
-	}
-
 	return predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return filterHCP(e.Object)
-		},
+		CreateFunc: func(e event.CreateEvent) bool { return true },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldHCP, oldOK := e.ObjectOld.(*hyperv1beta1.HostedControlPlane)
 			newHCP, newOK := e.ObjectNew.(*hyperv1beta1.HostedControlPlane)
 			if oldOK && newOK {
 				oldVal := oldHCP.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]
 				newVal := newHCP.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]
-				return oldVal != newVal || !equality.Semantic.DeepEqual(awsResourceTags(oldHCP), awsResourceTags(newHCP))
+				return oldVal != newVal ||
+					!equality.Semantic.DeepEqual(awsResourceTags(oldHCP), awsResourceTags(newHCP)) ||
+					hypershift.ControlPlaneVersionChanged(oldHCP, newHCP)
 			}
 			return false
 		},
