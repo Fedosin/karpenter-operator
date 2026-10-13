@@ -69,3 +69,9 @@ func New(_ context.Context, infra common.InfrastructureInfo) (*Provider, error) 
 func (p *Provider) NodeIdentityVerifier() common.NodeIdentityVerifier {
 	return nil
 }
+
+func (p *Provider) HCPNodeClassProvider() common.HCPNodeClassProvider {
+	return hcpAzureNodeClassProvider{
+		vnetSubnetID: p.vnetSubnetID,
+	}
+}

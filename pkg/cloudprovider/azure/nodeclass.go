@@ -8,6 +8,7 @@ import (
 	azurevap "github.com/openshift/karpenter-operator/pkg/controllers/nodeclass/azure/vap"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -16,15 +17,31 @@ import (
 
 var _ common.HCPNodeClassProvider = hcpAzureNodeClassProvider{}
 
-type hcpAzureNodeClassProvider struct{}
-
-func (p *Provider) HCPNodeClassProvider() common.HCPNodeClassProvider {
-	return hcpAzureNodeClassProvider{}
+type hcpAzureNodeClassProvider struct {
+	vnetSubnetID string
 }
 
-// DefaultNodeClass returns nil because Azure default NodeClass is not supported.
-func (hcpAzureNodeClassProvider) DefaultNodeClass(_ string) (client.Object, controllerutil.MutateFn, error) {
-	return nil, nil, nil
+// DefaultNodeClass returns the default Azure NodeClass and mutation function for its complete desired state.
+func (p hcpAzureNodeClassProvider) DefaultNodeClass(_ string) (client.Object, controllerutil.MutateFn, error) {
+	nodeClass := &openshiftkarpenterv1alpha1.OpenShiftAzureNodeClass{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: openshiftkarpenterv1alpha1.SchemeGroupVersion.String(),
+			Kind:       "OpenShiftAzureNodeClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+	}
+
+	mutate := func() error {
+		nodeClass.Labels = map[string]string{
+			"app.kubernetes.io/managed-by": "karpenter-operator",
+		}
+		nodeClass.Spec = openshiftkarpenterv1alpha1.OpenShiftAzureNodeClassSpec{
+			VNETSubnetID: p.vnetSubnetID,
+		}
+
+		return nil
+	}
+	return nodeClass, mutate, nil
 }
 
 // WatchObject returns the Azure NodeClass type watched for default NodeClass changes.
