@@ -137,14 +137,6 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	clusterDeleting, err := hypershift.IsClusterDeleting(ctx, c.managementClient, hcp)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking cluster deletion state: %w", err)
-	}
-	if clusterDeleting {
-		return ctrl.Result{}, nil
-	}
-
 	if err := c.reconcileAutoNodeStatus(ctx, hcp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling AutoNode status: %w", err)
 	}

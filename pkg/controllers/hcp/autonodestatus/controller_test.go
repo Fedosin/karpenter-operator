@@ -7,8 +7,6 @@ import (
 
 	. "github.com/onsi/gomega"
 
-	"github.com/openshift/karpenter-operator/pkg/hypershift"
-
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	corev1 "k8s.io/api/core/v1"
@@ -253,51 +251,29 @@ func TestReconcileAutoNodeStatusApplyOnChange(t *testing.T) {
 	}
 }
 
-func TestReconcileAutoNodeStatusSkipsDeletingCluster(t *testing.T) {
+func TestReconcileAutoNodeStatusDeletingHostedControlPlane(t *testing.T) {
 	const testNamespace = "test-namespace"
-
-	tests := map[string]struct {
-		hcp               *hyperv1beta1.HostedControlPlane
-		managementObjects []client.Object
-		wantApply         bool
-	}{
-		"When the HostedControlPlane is deleting, it should not apply the status": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:              "test-hcp",
-					Namespace:         testNamespace,
-					DeletionTimestamp: &metav1.Time{Time: time.Now()},
-					Finalizers:        []string{"test-finalizer"},
-				},
-			},
-			wantApply: false,
-		},
-		"When the CAPI Cluster is deleting, it should not apply the status": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: testNamespace},
-				Spec:       hyperv1beta1.HostedControlPlaneSpec{InfraID: "test-infra-id"},
-			},
-			managementObjects: []client.Object{newDeletingCAPICluster(testNamespace, "test-infra-id")},
-			wantApply:         false,
+	g := NewWithT(t)
+	hcp := &hyperv1beta1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-hcp",
+			Namespace:         testNamespace,
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Finalizers:        []string{"test-finalizer"},
 		},
 	}
+	applied := false
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			g := NewWithT(t)
-			applied := false
-
-			r := &Controller{
-				config:           &ControllerConfig{Namespace: testNamespace},
-				managementClient: newManagementClientWithApplyTracking(t, &applied, append(tc.managementObjects, tc.hcp)...),
-				hostedClient:     fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
-			}
-			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(tc.hcp)})
-			g.Expect(err).NotTo(HaveOccurred())
-
-			g.Expect(applied).To(Equal(tc.wantApply))
-		})
+	r := &Controller{
+		config:           &ControllerConfig{Namespace: testNamespace},
+		managementClient: newManagementClientWithApplyTracking(t, &applied, hcp),
+		hostedClient:     fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
 	}
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcp)})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	// The status keeps reflecting the hosted cluster while Karpenter resources are cleaned up.
+	g.Expect(applied).To(BeTrue())
 }
 
 func TestSumNodeClaimVCPUs(t *testing.T) {
@@ -404,7 +380,6 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group: "karpenter.sh", Version: "v1", Kind: "NodeClaimList",
 	}, &karpenterv1.NodeClaimList{})
-	scheme.AddKnownTypeWithName(hypershift.NewCAPIClusterMetadata().GroupVersionKind(), &metav1.PartialObjectMetadata{})
 	return scheme
 }
 
@@ -425,13 +400,4 @@ func newManagementClientWithApplyTracking(t *testing.T, applied *bool, objects .
 			},
 		}).
 		Build()
-}
-
-func newDeletingCAPICluster(namespace, name string) *metav1.PartialObjectMetadata {
-	cluster := hypershift.NewCAPIClusterMetadata()
-	cluster.Namespace = namespace
-	cluster.Name = name
-	cluster.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	cluster.Finalizers = []string{"test-finalizer"}
-	return cluster
 }
