@@ -10,6 +10,8 @@ import (
 
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -44,6 +46,7 @@ type Controller struct {
 	config           *ControllerConfig
 	hostedClient     client.Client
 	managementClient client.Client
+	capiClusterGVK   schema.GroupVersionKind
 }
 
 func NewController(mgr ctrl.Manager, cfg *ControllerConfig) *Controller {
@@ -66,6 +69,12 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		return errors.New("hosted cluster is required")
 	}
 
+	capiClusterGVK, err := hypershift.ResolveCAPIClusterGVK(mgr.GetRESTMapper())
+	if err != nil {
+		return err
+	}
+	c.capiClusterGVK = capiClusterGVK
+
 	// All events map to the same request since Reconcile looks up the HostedControlPlane of the namespace.
 	// The manager cache is limited to the operator namespace (see operator.Run), so no filtering is needed.
 	enqueueNamespace := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []ctrl.Request {
@@ -78,7 +87,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		// The CAPI Cluster is deleted earlier than the HCP in the HostedCluster deletion sequence,
 		// so reacting to it lets us start Karpenter node cleanup in parallel with regular CAPI node
 		// teardown rather than waiting for the HCP DeletionTimestamp (which is set much later).
-		Watches(hypershift.NewCAPIClusterMetadata(), enqueueNamespace).
+		Watches(hypershift.NewCAPIClusterMetadata(c.capiClusterGVK), enqueueNamespace).
 		Complete(c)
 }
 
@@ -94,7 +103,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	clusterDeleting, err := hypershift.IsClusterDeleting(ctx, c.managementClient, hcp)
+	clusterDeleting, err := hypershift.IsClusterDeleting(ctx, c.managementClient, hcp, c.capiClusterGVK)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking cluster deletion state: %w", err)
 	}

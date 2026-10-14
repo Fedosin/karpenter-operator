@@ -7,20 +7,30 @@ import (
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+var capiClusterGroupKind = schema.GroupKind{Group: "cluster.x-k8s.io", Kind: "Cluster"}
+
+// ResolveCAPIClusterGVK returns the CAPI Cluster version preferred by the API server.
+// Only CAPI Cluster metadata is read, which is identical across versions, so no specific
+// version has to be required.
+func ResolveCAPIClusterGVK(mapper meta.RESTMapper) (schema.GroupVersionKind, error) {
+	mapping, err := mapper.RESTMapping(capiClusterGroupKind)
+	if err != nil {
+		return schema.GroupVersionKind{}, fmt.Errorf("resolving CAPI Cluster version: %w", err)
+	}
+	return mapping.GroupVersionKind, nil
+}
+
 // NewCAPIClusterMetadata returns an empty metadata-only CAPI Cluster for use with Get and watches.
-func NewCAPIClusterMetadata() *metav1.PartialObjectMetadata {
+func NewCAPIClusterMetadata(gvk schema.GroupVersionKind) *metav1.PartialObjectMetadata {
 	capiCluster := &metav1.PartialObjectMetadata{}
-	capiCluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta2",
-		Kind:    "Cluster",
-	})
+	capiCluster.SetGroupVersionKind(gvk)
 	return capiCluster
 }
 
@@ -29,7 +39,8 @@ func NewCAPIClusterMetadata() *metav1.PartialObjectMetadata {
 // The CAPI Cluster is deleted earlier in the HostedCluster deletion sequence than
 // the HCP, so checking it allows node cleanup to begin sooner — in parallel with
 // regular CAPI node teardown instead of after it completes.
-func IsClusterDeleting(ctx context.Context, c client.Reader, hcp *hyperv1beta1.HostedControlPlane) (bool, error) {
+func IsClusterDeleting(ctx context.Context, c client.Reader, hcp *hyperv1beta1.HostedControlPlane,
+	capiClusterGVK schema.GroupVersionKind) (bool, error) {
 	if hcp.DeletionTimestamp != nil {
 		return true, nil
 	}
@@ -38,7 +49,7 @@ func IsClusterDeleting(ctx context.Context, c client.Reader, hcp *hyperv1beta1.H
 		return false, nil
 	}
 
-	capiCluster := NewCAPIClusterMetadata()
+	capiCluster := NewCAPIClusterMetadata(capiClusterGVK)
 	if err := c.Get(ctx, client.ObjectKey{
 		Namespace: hcp.Namespace,
 		Name:      hcp.Spec.InfraID,

@@ -271,6 +271,7 @@ func TestKarpenterDeletion(t *testing.T) {
 				config:           &ControllerConfig{Namespace: testNamespace},
 				managementClient: fakeManagementClient,
 				hostedClient:     fakeHostedClient,
+				capiClusterGVK:   capiClusterGVK(),
 			}
 
 			// Reconcile twice to advance through successive cleanup steps.
@@ -337,6 +338,7 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 			r := &Controller{
 				config:           &ControllerConfig{Namespace: testNamespace},
 				managementClient: managementClient,
+				capiClusterGVK:   capiClusterGVK(),
 			}
 			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcp)})
 			g.Expect(err).NotTo(HaveOccurred())
