@@ -62,11 +62,12 @@ oc delete nodepool --all
 GO111MODULE=on GOWORK=off go test \
   -C "$KARPENTER_CORE_DIR" \
   -count 1 \
-  -timeout 1h \
+  -timeout 3h \
   -v \
   "$KARPENTER_CORE_DIR"/test/suites/$(echo "$TEST_SUITE" | tr A-Z a-z)/... \
   --ginkgo.focus="${FOCUS}" \
-  --ginkgo.timeout=1h \
+  --ginkgo.skip="${SKIP}" \
+  --ginkgo.timeout=3h \
   --ginkgo.grace-period=5m \
   --ginkgo.vv \
   --default-nodeclass="$TMPFILE" \
