@@ -10,9 +10,9 @@ import (
 	"time"
 
 	openshiftkarpenterv1 "github.com/openshift/karpenter-operator/api/karpenter/v1"
+	nodeclassstatus "github.com/openshift/karpenter-operator/pkg/controllers/nodeclass/status"
 	"github.com/openshift/karpenter-operator/pkg/hypershift"
 
-	configv1 "github.com/openshift/api/config/v1"
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	awskarpenterapis "github.com/aws/karpenter-provider-aws/pkg/apis"
@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 
@@ -97,11 +96,11 @@ func (r *EC2NodeClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapVAPToOpenShiftEC2NodeClasses))).
 		WatchesRawSource(source.Kind[client.Object](hostedCache, &admissionv1.ValidatingAdmissionPolicyBinding{},
 			handler.EnqueueRequestsFromMapFunc(r.mapVAPBindingToOpenShiftEC2NodeClasses))).
-		// Watch secrets in the management cluster and reconcile all ec2nodeclasses
+		// Watch user data secrets in the management cluster and reconcile the ec2nodeclass they belong to
 		Watches(&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
-			builder.WithPredicates(r.karpenterSecretPredicate())).
-		// Watch HostedControlPlane for instance profile and resource tag changes
+			hypershift.EnqueueNodeClassForUserDataSecret(),
+			builder.WithPredicates(hypershift.KarpenterSecretPredicate())).
+		// Watch HostedControlPlane for instance profile, resource tag and control plane version changes
 		Watches(&hyperv1beta1.HostedControlPlane{},
 			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
 			builder.WithPredicates(r.hcpPredicate())).
@@ -114,8 +113,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	hcp, err := hypershift.GetHostedControlPlane(ctx, r.managementClient, r.namespace)
 	if err != nil {
 		if errors.Is(err, hypershift.ErrHostedControlPlaneNotFound) {
-			log.V(1).Info("HostedControlPlane not found, requeueing")
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -174,9 +172,9 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	userDataSecret, err := r.getUserDataSecret(ctx, openshiftEC2NodeClass)
+	userDataSecret, err := hypershift.GetUserDataSecret(ctx, r.managementClient, r.namespace, openshiftEC2NodeClass.Name)
 	if err != nil {
-		if errors.Is(err, errKarpenterUserDataSecretNotFound) {
+		if errors.Is(err, hypershift.ErrUserDataSecretNotFound) {
 			// Don't treat this as an error
 			// ec2nodeclass controller might have been faster than karpenterignition controller to generate the user data secret
 			log.V(1).Info("User data secret not found, requeueing", "err", err)
@@ -212,10 +210,6 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// We requeue an un-pinned NodeClass if the control plane is in the middle of an upgrade to eventually ensure the NodeClass is upgraded to the new release image.
-	if openshiftEC2NodeClass.Spec.Version == "" && isControlPlaneUpgrading(hcp) {
-		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
-	}
 	return ctrl.Result{}, nil
 }
 
@@ -239,36 +233,14 @@ func deleteIfNeeded(ctx context.Context, c client.Client, o client.Object) (exis
 	return true, nil
 }
 
-// isControlPlaneUpgrading returns true when the desired release image differs
-// from the most recent Completed version in history.
-// Returns false during initial install (no Completed entry or desired not yet populated).
-// The loop returns on the first CompletedUpdate entry found. This is safe because the
-// ControlPlaneVersion.History list is ordered newest-first per the API contract.
-func isControlPlaneUpgrading(hcp *hyperv1beta1.HostedControlPlane) bool {
-	desiredImage := hcp.Status.ControlPlaneVersion.Desired.Image
-	if desiredImage == "" {
-		return false
-	}
-
-	for _, entry := range hcp.Status.ControlPlaneVersion.History {
-		if entry.State == configv1.CompletedUpdate {
-			return entry.Image != desiredImage
-		}
-	}
-
-	return false
-}
-
 func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftEC2NodeClass *openshiftkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1beta1.HostedControlPlane, userDataSecret *corev1.Secret) error { //nolint:gocyclo
-	pauseUpgrade := isControlPlaneUpgrading(hcp)
-
 	var amiSelectorTerms []awskarpenterv1.AMISelectorTerm
 
 	userData := new(string(userDataSecret.Data["value"]))
 
 	// When upgrade is in progress, and the nodeclass is tied to the control plane version, and the EC2NodeClass already has AMI/UserData set
 	// (i.e. not the first creation), preserve the existing drift-triggering fields that cause a node rollout upgrade.
-	if pauseUpgrade && openshiftEC2NodeClass.Spec.Version == "" && len(ec2NodeClass.Spec.AMISelectorTerms) > 0 && ec2NodeClass.Spec.UserData != nil {
+	if hypershift.WaitsForControlPlaneUpgrade(hcp, openshiftEC2NodeClass.Spec.Version) && len(ec2NodeClass.Spec.AMISelectorTerms) > 0 && ec2NodeClass.Spec.UserData != nil {
 		ctrl.LoggerFrom(ctx).V(1).Info("Control plane upgrade in progress, preserving existing userData and amis")
 		userData = ec2NodeClass.Spec.UserData
 		amiSelectorTerms = ec2NodeClass.Spec.AMISelectorTerms
@@ -413,16 +385,7 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 		openshiftNodeClass.Status.CapacityReservations = append(openshiftNodeClass.Status.CapacityReservations, resolved)
 	}
 
-	// Sync conditions from the upstream EC2NodeClass. Use SetStatusCondition so that
-	// conditions managed by the ignition controller are preserved.
-	for _, condition := range ec2NodeClass.Status.Conditions {
-		meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition(condition))
-	}
-
-	// Compute the top-level Ready condition atomically by combining EC2 readiness
-	// with version resolution status. This ensures a single controller owns the
-	// Ready semantic rather than having multiple controllers race to set it.
-	r.computeReadyCondition(openshiftNodeClass)
+	openshiftNodeClass.Status.Conditions = nodeclassstatus.SyncConditions(openshiftNodeClass.Status.Conditions, ec2NodeClass.Status.Conditions, openshiftNodeClass.Generation)
 
 	setAWSResourceTagConflictCondition(openshiftNodeClass, hcp)
 
@@ -434,29 +397,6 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 	}
 
 	return nil
-}
-
-// computeReadyCondition computes the top-level Ready condition by combining
-// the upstream EC2NodeClass Ready status with the VersionResolved condition.
-// If VersionResolved is False, Ready is set to False regardless of EC2 readiness.
-func (r *EC2NodeClassReconciler) computeReadyCondition(openshiftNodeClass *openshiftkarpenterv1.OpenshiftEC2NodeClass) {
-	versionResolved := meta.FindStatusCondition(openshiftNodeClass.Status.Conditions, openshiftkarpenterv1.ConditionTypeVersionResolved)
-	if versionResolved == nil || versionResolved.Status != metav1.ConditionTrue {
-		reason := openshiftkarpenterv1.ConditionReasonResolutionFailed
-		message := "Version resolution status is unknown"
-		if versionResolved != nil {
-			reason = versionResolved.Reason
-			message = fmt.Sprintf("Version resolution failed: %s", versionResolved.Message)
-		}
-		meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
-			Type:               openshiftkarpenterv1.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: openshiftNodeClass.Generation,
-			LastTransitionTime: metav1.Now(),
-			Reason:             reason,
-			Message:            message,
-		})
-	}
 }
 
 func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.Context, hcp *hyperv1beta1.HostedControlPlane) error { //nolint:gocyclo
@@ -602,42 +542,19 @@ func (r *EC2NodeClassReconciler) reconcileVAP(ctx context.Context) error {
 	return err
 }
 
-// karpenterSecretPredicate only returns true on creates/updates of Secrets matching karpenterSecretSelector.
-func (r *EC2NodeClassReconciler) karpenterSecretPredicate() predicate.Predicate {
-	isKarpenterSecret := func(obj client.Object) bool {
-		return karpenterSecretSelector.Matches(labels.Set(obj.GetLabels()))
-	}
-	return predicate.Funcs{
-		CreateFunc:  func(e event.CreateEvent) bool { return isKarpenterSecret(e.Object) },
-		UpdateFunc:  func(e event.UpdateEvent) bool { return isKarpenterSecret(e.ObjectNew) },
-		DeleteFunc:  func(e event.DeleteEvent) bool { return false },
-		GenericFunc: func(e event.GenericEvent) bool { return false },
-	}
-}
-
 // hcpPredicate filters HostedControlPlane events to changes that affect EC2NodeClasses.
 func (r *EC2NodeClassReconciler) hcpPredicate() predicate.Predicate {
-	filterHCP := func(obj client.Object) bool {
-		if hcp, ok := obj.(*hyperv1beta1.HostedControlPlane); ok {
-			// Trigger if the annotation exists
-			if _, exists := hcp.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]; exists {
-				return true
-			}
-		}
-		return false
-	}
-
 	return predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return filterHCP(e.Object)
-		},
+		CreateFunc: func(e event.CreateEvent) bool { return true },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldHCP, oldOK := e.ObjectOld.(*hyperv1beta1.HostedControlPlane)
 			newHCP, newOK := e.ObjectNew.(*hyperv1beta1.HostedControlPlane)
 			if oldOK && newOK {
 				oldVal := oldHCP.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]
 				newVal := newHCP.Annotations[hyperv1beta1.AWSKarpenterDefaultInstanceProfile]
-				return oldVal != newVal || !equality.Semantic.DeepEqual(awsResourceTags(oldHCP), awsResourceTags(newHCP))
+				return oldVal != newVal ||
+					!equality.Semantic.DeepEqual(awsResourceTags(oldHCP), awsResourceTags(newHCP)) ||
+					hypershift.ControlPlaneVersionChanged(oldHCP, newHCP)
 			}
 			return false
 		},

@@ -55,9 +55,9 @@ func (hcpAzureNodeClassProvider) CRDs() []*apiextensionsv1.CustomResourceDefinit
 }
 
 // NewControllers returns the controllers that reconcile OpenShiftAzureNodeClass and AKSNodeClass resources.
-func (hcpAzureNodeClassProvider) NewControllers(hostedCluster cluster.Cluster, _ string) []common.NodeClassController {
+func (hcpAzureNodeClassProvider) NewControllers(hostedCluster cluster.Cluster, namespace string) []common.NodeClassController {
 	return []common.NodeClassController{
-		azurenodeclass.NewNodeClassController(hostedCluster),
+		azurenodeclass.NewNodeClassController(hostedCluster, namespace),
 		azurevap.NewController(hostedCluster),
 	}
 }

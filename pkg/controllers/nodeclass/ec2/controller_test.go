@@ -15,6 +15,7 @@ import (
 	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/awslabs/operatorpkg/status"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,7 +71,7 @@ func TestReconcile(t *testing.T) {
 				archToAMILabelKey(hyperv1beta1.ArchitectureARM64): arm64AMI,
 			},
 			Annotations: map[string]string{
-				openshiftkarpenterv1.TokenSecretNodePoolAnnotation: "clusters/default-karpenter",
+				openshiftkarpenterv1.TokenSecretNodePoolAnnotation: hcpNamespace + "/default-karpenter",
 			},
 		},
 		Data: map[string][]byte{
@@ -102,9 +103,9 @@ func TestReconcile(t *testing.T) {
 		expectedResult    ctrl.Result
 		expectedHosted    func(g Gomega, hostedClient client.Client)
 	}{
-		"When no HostedControlPlane exists, it should requeue": {
+		"When no HostedControlPlane exists, it should not create the EC2NodeClass": {
 			hostedObjects:  []client.Object{newOpenshiftEC2NodeClass(false)},
-			expectedResult: ctrl.Result{RequeueAfter: 5 * time.Second},
+			expectedResult: ctrl.Result{},
 			expectedHosted: func(g Gomega, hostedClient client.Client) {
 				err := hostedClient.Get(t.Context(), client.ObjectKey{Name: nodeClassName}, &awskarpenterv1.EC2NodeClass{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
@@ -854,79 +855,6 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 	}
 }
 
-func TestIsControlPlaneUpgrading(t *testing.T) {
-	tests := map[string]struct {
-		hcp      *hyperv1beta1.HostedControlPlane
-		expected bool
-	}{
-		"When desired image is empty, it should return false": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				Status: hyperv1beta1.HostedControlPlaneStatus{
-					ControlPlaneVersion: hyperv1beta1.ControlPlaneVersionStatus{},
-				},
-			},
-			expected: false,
-		},
-		"When no history entries exist (initial install), it should return false": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				Status: hyperv1beta1.HostedControlPlaneStatus{
-					ControlPlaneVersion: hyperv1beta1.ControlPlaneVersionStatus{
-						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
-					},
-				},
-			},
-			expected: false,
-		},
-		"When desired matches completed, it should return false": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				Status: hyperv1beta1.HostedControlPlaneStatus{
-					ControlPlaneVersion: hyperv1beta1.ControlPlaneVersionStatus{
-						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
-						History: []hyperv1beta1.ControlPlaneUpdateHistory{
-							{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		"When desired differs from completed (upgrade in progress), it should return true": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				Status: hyperv1beta1.HostedControlPlaneStatus{
-					ControlPlaneVersion: hyperv1beta1.ControlPlaneVersionStatus{
-						Desired: configv1.Release{Image: "quay.io/release:4.18.0"},
-						History: []hyperv1beta1.ControlPlaneUpdateHistory{
-							{State: configv1.PartialUpdate, Image: "quay.io/release:4.18.0"},
-							{State: configv1.CompletedUpdate, Image: "quay.io/release:4.17.0"},
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		"When only partial entries exist (initial install still running), it should return false": {
-			hcp: &hyperv1beta1.HostedControlPlane{
-				Status: hyperv1beta1.HostedControlPlaneStatus{
-					ControlPlaneVersion: hyperv1beta1.ControlPlaneVersionStatus{
-						Desired: configv1.Release{Image: "quay.io/release:4.17.0"},
-						History: []hyperv1beta1.ControlPlaneUpdateHistory{
-							{State: configv1.PartialUpdate, Image: "quay.io/release:4.17.0"},
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			g := NewWithT(t)
-			g.Expect(isControlPlaneUpgrading(tc.hcp)).To(Equal(tc.expected))
-		})
-	}
-}
-
 func TestReconcileEC2NodeClassUpgradePause(t *testing.T) {
 	oldUserData := new("old-userdata-hash-abc")
 	oldAMI := []awskarpenterv1.AMISelectorTerm{{ID: "ami-old"}}
@@ -1203,6 +1131,47 @@ func TestReconcileStatusIdempotency(t *testing.T) {
 	g.Expect(final.Status.SecurityGroups).To(HaveLen(1))
 }
 
+func TestReconcileStatusSyncsConditions(t *testing.T) {
+	g := NewWithT(t)
+
+	openshiftNodeClass := &openshiftkarpenterv1.OpenshiftEC2NodeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Generation: 1},
+		Status: openshiftkarpenterv1.OpenshiftEC2NodeClassStatus{
+			Conditions: []metav1.Condition{{
+				Type:               openshiftkarpenterv1.ConditionTypeVersionResolved,
+				Status:             metav1.ConditionFalse,
+				Reason:             openshiftkarpenterv1.ConditionReasonResolutionFailed,
+				Message:            "version 4.30.0 is not available in channel stable-4.21",
+				ObservedGeneration: 1,
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme()).
+		WithObjects(openshiftNodeClass).
+		WithStatusSubresource(openshiftNodeClass).
+		Build()
+	r := &EC2NodeClassReconciler{hostedClient: fakeClient}
+
+	ec2NodeClass := &awskarpenterv1.EC2NodeClass{
+		Status: awskarpenterv1.EC2NodeClassStatus{
+			Conditions: []status.Condition{
+				{Type: awskarpenterv1.ConditionTypeSubnetsReady, Status: metav1.ConditionTrue, Reason: awskarpenterv1.ConditionTypeSubnetsReady},
+				{Type: openshiftkarpenterv1.ConditionTypeReady, Status: metav1.ConditionTrue, Reason: openshiftkarpenterv1.ConditionTypeReady},
+			},
+		},
+	}
+
+	// When the version is not resolved, it should copy the EC2NodeClass conditions but report not ready.
+	g.Expect(r.reconcileStatus(t.Context(), ec2NodeClass, openshiftNodeClass, &hyperv1beta1.HostedControlPlane{})).To(Succeed())
+
+	updated := &openshiftkarpenterv1.OpenshiftEC2NodeClass{}
+	g.Expect(fakeClient.Get(t.Context(), client.ObjectKeyFromObject(openshiftNodeClass), updated)).To(Succeed())
+	g.Expect(meta.IsStatusConditionTrue(updated.Status.Conditions, awskarpenterv1.ConditionTypeSubnetsReady)).To(BeTrue())
+	g.Expect(meta.IsStatusConditionFalse(updated.Status.Conditions, openshiftkarpenterv1.ConditionTypeReady)).To(BeTrue())
+}
+
 func TestReconcileStatusPreservesIgnitionOwnedFields(t *testing.T) {
 	g := NewWithT(t)
 
@@ -1432,228 +1401,6 @@ func TestReconcileStatusTagConflictCondition(t *testing.T) {
 	}
 }
 
-func TestComputeReadyCondition(t *testing.T) {
-	tests := map[string]struct {
-		conditions          []metav1.Condition
-		expectedReadyStatus metav1.ConditionStatus
-		expectedReadyReason string
-		readyShouldChange   bool
-	}{
-		"When VersionResolved is False, it should set Ready to False": {
-			conditions: []metav1.Condition{
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeReady,
-					Status:  metav1.ConditionTrue,
-					Reason:  "Ready",
-					Message: "EC2NodeClass is ready",
-				},
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeVersionResolved,
-					Status:  metav1.ConditionFalse,
-					Reason:  openshiftkarpenterv1.ConditionReasonResolutionFailed,
-					Message: "Failed to resolve version \"4.17.0\": Cincinnati API unavailable",
-				},
-			},
-			expectedReadyStatus: metav1.ConditionFalse,
-			expectedReadyReason: openshiftkarpenterv1.ConditionReasonResolutionFailed,
-			readyShouldChange:   true,
-		},
-		"When VersionResolved is True, it should not override Ready": {
-			conditions: []metav1.Condition{
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeReady,
-					Status:  metav1.ConditionTrue,
-					Reason:  "Ready",
-					Message: "EC2NodeClass is ready",
-				},
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeVersionResolved,
-					Status:  metav1.ConditionTrue,
-					Reason:  openshiftkarpenterv1.ConditionReasonVersionResolved,
-					Message: "Version resolved",
-				},
-			},
-			expectedReadyStatus: metav1.ConditionTrue,
-			expectedReadyReason: "Ready",
-			readyShouldChange:   false,
-		},
-		"When VersionResolved condition is absent, it should set Ready to False": {
-			conditions: []metav1.Condition{
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeReady,
-					Status:  metav1.ConditionTrue,
-					Reason:  "Ready",
-					Message: "EC2NodeClass is ready",
-				},
-			},
-			expectedReadyStatus: metav1.ConditionFalse,
-			expectedReadyReason: openshiftkarpenterv1.ConditionReasonResolutionFailed,
-			readyShouldChange:   true,
-		},
-		"When VersionResolved is Unknown, it should set Ready to False": {
-			conditions: []metav1.Condition{
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeReady,
-					Status:  metav1.ConditionTrue,
-					Reason:  "Ready",
-					Message: "EC2NodeClass is ready",
-				},
-				{
-					Type:    openshiftkarpenterv1.ConditionTypeVersionResolved,
-					Status:  metav1.ConditionUnknown,
-					Reason:  "Unknown",
-					Message: "Version resolution status is unknown",
-				},
-			},
-			expectedReadyStatus: metav1.ConditionFalse,
-			expectedReadyReason: "Unknown",
-			readyShouldChange:   true,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			g := NewWithT(t)
-
-			openshiftNodeClass := &openshiftkarpenterv1.OpenshiftEC2NodeClass{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "test-nodeclass",
-					Generation: 1,
-				},
-				Status: openshiftkarpenterv1.OpenshiftEC2NodeClassStatus{
-					Conditions: tc.conditions,
-				},
-			}
-
-			r := &EC2NodeClassReconciler{}
-			r.computeReadyCondition(openshiftNodeClass)
-
-			readyCond := findCondition(openshiftNodeClass.Status.Conditions, openshiftkarpenterv1.ConditionTypeReady)
-			g.Expect(readyCond).NotTo(BeNil())
-			g.Expect(readyCond.Status).To(Equal(tc.expectedReadyStatus))
-			g.Expect(readyCond.Reason).To(Equal(tc.expectedReadyReason))
-		})
-	}
-}
-
-func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
-	for i, c := range conditions {
-		if c.Type == condType {
-			return &conditions[i]
-		}
-	}
-	return nil
-}
-
-func TestKarpenterSecretPredicate(t *testing.T) {
-	tests := map[string]struct {
-		secret         *corev1.Secret
-		eventType      string
-		expectedResult bool
-	}{
-		"When a karpenter secret is created, it should accept the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "karpenter-secret",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						openshiftkarpenterv1.ManagedByKarpenterLabel: "true",
-					},
-				},
-			},
-			eventType:      "Create",
-			expectedResult: true,
-		},
-		"When a karpenter secret is updated, it should accept the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "karpenter-secret",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						openshiftkarpenterv1.ManagedByKarpenterLabel: "true",
-					},
-				},
-			},
-			eventType:      "Update",
-			expectedResult: true,
-		},
-		"When a karpenter secret is deleted, it should reject the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "karpenter-secret",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						openshiftkarpenterv1.ManagedByKarpenterLabel: "true",
-					},
-				},
-			},
-			eventType:      "Delete",
-			expectedResult: false,
-		},
-		"When a generic event occurs for a karpenter secret, it should reject the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "karpenter-secret",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						openshiftkarpenterv1.ManagedByKarpenterLabel: "true",
-					},
-				},
-			},
-			eventType:      "Generic",
-			expectedResult: false,
-		},
-		"When a secret has no ManagedByKarpenterLabel, it should reject the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "regular-secret",
-					Namespace: "test-namespace",
-				},
-			},
-			eventType:      "Create",
-			expectedResult: false,
-		},
-		"When a secret has ManagedByKarpenterLabel set to false, it should reject the event": {
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "other-secret",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						openshiftkarpenterv1.ManagedByKarpenterLabel: "false",
-					},
-				},
-			},
-			eventType:      "Create",
-			expectedResult: false,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			g := NewWithT(t)
-
-			r := &EC2NodeClassReconciler{}
-
-			pred := r.karpenterSecretPredicate()
-
-			var result bool
-			switch tc.eventType {
-			case "Create":
-				result = pred.Create(event.CreateEvent{Object: tc.secret})
-			case "Update":
-				result = pred.Update(event.UpdateEvent{ObjectNew: tc.secret, ObjectOld: tc.secret})
-			case "Delete":
-				result = pred.Delete(event.DeleteEvent{Object: tc.secret})
-			case "Generic":
-				result = pred.Generic(event.GenericEvent{Object: tc.secret})
-			default:
-				t.Fatalf("invalid event type: %s", tc.eventType)
-			}
-
-			g.Expect(result).To(Equal(tc.expectedResult))
-		})
-	}
-}
 func TestHCPPredicate(t *testing.T) {
 	const namespace = "clusters-example"
 
@@ -1678,6 +1425,16 @@ func TestHCPPredicate(t *testing.T) {
 		return hcp
 	}
 	costCenter := hyperv1beta1.AWSClusterResourceTag{Key: "cost-center", Value: "1234"}
+	upgradingHCP := newHCP("example-4x7kq-worker")
+	upgradingHCP.Status.ControlPlaneVersion = hyperv1beta1.ControlPlaneVersionStatus{
+		Desired: configv1.Release{Image: "quay.io/openshift-release-dev/ocp-release:4.22.1-x86_64"},
+		History: []hyperv1beta1.ControlPlaneUpdateHistory{
+			{State: configv1.PartialUpdate, Image: "quay.io/openshift-release-dev/ocp-release:4.22.1-x86_64"},
+			{State: configv1.CompletedUpdate, Image: "quay.io/openshift-release-dev/ocp-release:4.21.10-x86_64"},
+		},
+	}
+	upgradedHCP := upgradingHCP.DeepCopy()
+	upgradedHCP.Status.ControlPlaneVersion.History[0].State = configv1.CompletedUpdate
 
 	tests := map[string]struct {
 		oldHCP         *hyperv1beta1.HostedControlPlane
@@ -1706,6 +1463,11 @@ func TestHCPPredicate(t *testing.T) {
 			newHCP:         newHCP("", costCenter),
 			expectedResult: true,
 		},
+		"When a control plane upgrade completes, it should accept the event": {
+			oldHCP:         upgradingHCP,
+			newHCP:         upgradedHCP,
+			expectedResult: true,
+		},
 		"When neither the instance profile nor the resource tags change, it should reject the event": {
 			oldHCP:         newHCP("example-4x7kq-worker", costCenter),
 			newHCP:         newHCP("example-4x7kq-worker", costCenter),
@@ -1723,6 +1485,12 @@ func TestHCPPredicate(t *testing.T) {
 			g.Expect(result).To(Equal(tc.expectedResult))
 		})
 	}
+
+	t.Run("When a HostedControlPlane is created, it should accept the event", func(t *testing.T) {
+		g := NewWithT(t)
+		r := &EC2NodeClassReconciler{}
+		g.Expect(r.hcpPredicate().Create(event.CreateEvent{Object: newHCP("example-4x7kq-worker")})).To(BeTrue())
+	})
 }
 
 func TestReconcileKarpenterSubnetsConfigMap(t *testing.T) {
