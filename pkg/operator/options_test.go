@@ -1,8 +1,12 @@
 package operator
 
 import (
-	"strings"
 	"testing"
+
+	. "github.com/onsi/gomega"
+
+	"github.com/openshift/karpenter-operator/pkg/cloudprovider/common"
+	testfake "github.com/openshift/karpenter-operator/test/pkg/fake"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -24,94 +28,128 @@ func TestLoadEnv(t *testing.T) {
 	t.Setenv(ClusterEndpointEnvName, "https://api-int.example.com:6443")
 	t.Setenv(PlatformEnvName, "AWS")
 	t.Setenv(RegionEnvName, "us-east-1")
-	t.Setenv(ManagementClusterEnvName, "true")
 	t.Setenv(TokenMinterImageEnvName, "quay.io/openshift/hypershift:latest")
 
-	var opts Options
-	err := opts.LoadEnv()
-	if err != nil {
-		t.Fatalf("failed to load env: %v", err)
+	tests := map[string]struct {
+		managementCluster      string
+		securityContextUID     string
+		wantManagementCluster  bool
+		wantSecurityContextUID *int64
+		wantErr                string
+	}{
+		"When all environment variables are set, it should load the configured options": {
+			managementCluster:      "true",
+			securityContextUID:     "1002",
+			wantManagementCluster:  true,
+			wantSecurityContextUID: new(int64(1002)),
+		},
+		"When management cluster mode is empty, it should default to standalone mode": {
+			wantManagementCluster:  false,
+			wantSecurityContextUID: nil,
+		},
+		"When management cluster mode is false, it should load standalone mode": {
+			managementCluster:     "false",
+			wantManagementCluster: false,
+		},
+		"When management cluster mode is not a boolean, it should return an error": {
+			managementCluster: "notabool",
+			wantErr:           "invalid MANAGEMENT_CLUSTER",
+		},
+		"When the UID is empty, it should leave the UID unspecified": {
+			managementCluster:      "true",
+			wantManagementCluster:  true,
+			wantSecurityContextUID: nil,
+		},
+		"When the UID is root, it should load it for validation": {
+			managementCluster:      "true",
+			securityContextUID:     "0",
+			wantManagementCluster:  true,
+			wantSecurityContextUID: new(int64(0)),
+		},
+		"When the UID is negative, it should load it for validation": {
+			managementCluster:      "true",
+			securityContextUID:     "-1",
+			wantManagementCluster:  true,
+			wantSecurityContextUID: new(int64(-1)),
+		},
+		"When the UID is not an integer, it should return an error": {
+			managementCluster:      "true",
+			securityContextUID:     "not-a-uid",
+			wantSecurityContextUID: nil,
+			wantErr:                "loading DEFAULT_SECURITY_CONTEXT_UID",
+		},
+		"When the UID overflows, it should return an error": {
+			managementCluster:      "true",
+			securityContextUID:     "9223372036854775808",
+			wantSecurityContextUID: nil,
+			wantErr:                "loading DEFAULT_SECURITY_CONTEXT_UID",
+		},
 	}
 
-	if opts.ReleaseVersion != "4.23.0" {
-		t.Errorf("ReleaseVersion = %q, want %q", opts.ReleaseVersion, "4.23.0")
-	}
-	if opts.ClusterName != "my-cluster" {
-		t.Errorf("ClusterName = %q, want %q", opts.ClusterName, "my-cluster")
-	}
-	if opts.ClusterEndpoint != "https://api-int.example.com:6443" {
-		t.Errorf("ClusterEndpoint = %q, want %q", opts.ClusterEndpoint, "https://api-int.example.com:6443")
-	}
-	if opts.Platform != "AWS" {
-		t.Errorf("Platform = %q, want %q", opts.Platform, "AWS")
-	}
-	if opts.Region != "us-east-1" {
-		t.Errorf("Region = %q, want %q", opts.Region, "us-east-1")
-	}
-	if !opts.ManagementCluster {
-		t.Error("ManagementCluster = false, want true")
-	}
-	if opts.TokenMinterImage != "quay.io/openshift/hypershift:latest" {
-		t.Errorf("TokenMinterImage = %q, want %q", opts.TokenMinterImage, "quay.io/openshift/hypershift:latest")
-	}
-}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			g := NewWithT(t)
+			t.Setenv(ManagementClusterEnvName, tc.managementCluster)
+			t.Setenv(DefaultSecurityContextUIDEnvName, tc.securityContextUID)
 
-func TestLoadEnvInvalidManagementCluster(t *testing.T) {
-	t.Setenv(ManagementClusterEnvName, "notabool")
-
-	var opts Options
-	if err := opts.LoadEnv(); err == nil {
-		t.Fatal("expected error for invalid MANAGEMENT_CLUSTER value, got nil")
+			var opts Options
+			err := opts.LoadEnv()
+			if tc.wantErr != "" {
+				g.Expect(err).To(MatchError(ContainSubstring(tc.wantErr)))
+				g.Expect(opts.DefaultSecurityContextUID).To(Equal(tc.wantSecurityContextUID))
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(opts).To(Equal(Options{
+				ReleaseVersion:            "4.23.0",
+				ClusterName:               "my-cluster",
+				ClusterEndpoint:           "https://api-int.example.com:6443",
+				Platform:                  "AWS",
+				Region:                    "us-east-1",
+				ManagementCluster:         tc.wantManagementCluster,
+				TokenMinterImage:          "quay.io/openshift/hypershift:latest",
+				DefaultSecurityContextUID: tc.wantSecurityContextUID,
+			}))
+		})
 	}
 }
 
 func TestValidate(t *testing.T) {
-	tests := []struct {
-		name    string
+	tests := map[string]struct {
 		opts    Options
-		wantErr bool
-		errMsg  string
+		wantErr string
 	}{
-		{
-			name: "valid with all required fields",
+		"When required fields are set, it should accept the options": {
 			opts: Options{
 				Namespace:      "openshift-karpenter",
 				ReleaseVersion: "4.23.0",
 			},
-			wantErr: false,
+			wantErr: "",
 		},
-		{
-			name: "missing namespace",
+		"When the namespace is missing, it should reject the options": {
 			opts: Options{
 				ReleaseVersion: "4.23.0",
 			},
-			wantErr: true,
-			errMsg:  "--namespace",
+			wantErr: "required configuration not set: --namespace",
 		},
-		{
-			name:    "missing all",
+		"When all options are empty, it should report the missing namespace": {
 			opts:    Options{},
-			wantErr: true,
-			errMsg:  "--namespace",
+			wantErr: "required configuration not set: --namespace",
 		},
-		{
-			name: "optional environment variables are not required",
+		"When optional environment variables are empty, it should accept the options": {
 			opts: Options{
 				Namespace: "openshift-karpenter",
 			},
-			wantErr: false,
+			wantErr: "",
 		},
-		{
-			name: "management cluster mode missing required fields",
+		"When management cluster fields are missing, it should reject the options": {
 			opts: Options{
 				Namespace:         "openshift-karpenter",
 				ManagementCluster: true,
 			},
-			wantErr: true,
-			errMsg:  "--target-kubeconfig",
+			wantErr: "required configuration not set: --target-kubeconfig, CLUSTER_NAME, CLUSTER_ENDPOINT, PLATFORM, REGION, TOKEN_MINTER_IMAGE",
 		},
-		{
-			name: "management cluster mode valid",
+		"When management cluster fields are set, it should accept the options": {
 			opts: Options{
 				Namespace:         "openshift-karpenter",
 				ManagementCluster: true,
@@ -122,10 +160,9 @@ func TestValidate(t *testing.T) {
 				Region:            "us-east-1",
 				TokenMinterImage:  "quay.io/openshift/hypershift:latest",
 			},
-			wantErr: false,
+			wantErr: "",
 		},
-		{
-			name: "management cluster mode missing region",
+		"When the region and token-minter image are missing, it should report both management cluster fields": {
 			opts: Options{
 				Namespace:         "openshift-karpenter",
 				ManagementCluster: true,
@@ -134,25 +171,69 @@ func TestValidate(t *testing.T) {
 				ClusterEndpoint:   "https://api-int.example.com:6443",
 				Platform:          "AWS",
 			},
-			wantErr: true,
-			errMsg:  RegionEnvName,
+			wantErr: "required configuration not set: REGION, TOKEN_MINTER_IMAGE",
+		},
+		"When the UID is unset, it should accept the options": {
+			opts: Options{
+				Namespace:                 "clusters-autoscale",
+				DefaultSecurityContextUID: nil,
+			},
+			wantErr: "",
+		},
+		"When the UID is positive, it should accept the options": {
+			opts: Options{
+				Namespace:                 "clusters-autoscale",
+				DefaultSecurityContextUID: new(int64(1002)),
+			},
+			wantErr: "",
+		},
+		"When the UID is root, it should reject the options": {
+			opts: Options{
+				Namespace:                 "clusters-autoscale",
+				DefaultSecurityContextUID: new(int64(0)),
+			},
+			wantErr: "DEFAULT_SECURITY_CONTEXT_UID must be a positive non-root UID",
+		},
+		"When the UID is negative, it should reject the options": {
+			opts: Options{
+				Namespace:                 "clusters-autoscale",
+				DefaultSecurityContextUID: new(int64(-1)),
+			},
+			wantErr: "DEFAULT_SECURITY_CONTEXT_UID must be a positive non-root UID",
 		},
 	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			g := NewWithT(t)
+			err := tc.opts.Validate()
+			if tc.wantErr != "" {
+				g.Expect(err).To(MatchError(tc.wantErr))
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+		})
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.opts.Validate()
-			if tt.wantErr && err == nil {
-				t.Fatal("expected error, got nil")
-			}
-			if !tt.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantErr && tt.errMsg != "" {
-				if got := err.Error(); !strings.Contains(got, tt.errMsg) {
-					t.Errorf("error %q does not contain %q", got, tt.errMsg)
-				}
-			}
+func TestResolveControllerConfig(t *testing.T) {
+	tests := map[string]struct {
+		uid     *int64
+		wantUID *int64
+	}{
+		"When the UID is unset, it should leave the controller UID unspecified": {
+			wantUID: nil,
+		},
+		"When a UID is supplied, it should pass it to the controller configuration": {
+			uid:     new(int64(1002)),
+			wantUID: new(int64(1002)),
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			g := NewWithT(t)
+			opts := Options{DefaultSecurityContextUID: tc.uid}
+			cfg := opts.ResolveControllerConfig(common.InfrastructureInfo{}, &testfake.CloudProvider{})
+			g.Expect(cfg.DefaultSecurityContextUID).To(Equal(tc.wantUID))
 		})
 	}
 }
