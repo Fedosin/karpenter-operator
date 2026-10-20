@@ -59,16 +59,22 @@ oc delete validatingadmissionpolicies.admissionregistration.k8s.io karpenter.ec2
 oc delete ec2nodeclasses.karpenter.k8s.aws --all --timeout 60s
 oc delete nodepool --all
 
+JUNIT_REPORT=()
+if [[ -n "${ARTIFACT_DIR:-}" ]]; then
+  JUNIT_REPORT=(--ginkgo.junit-report="${ARTIFACT_DIR}/junit_e2e.xml")
+fi
+
 GO111MODULE=on GOWORK=off go test \
   -C "$KARPENTER_CORE_DIR" \
   -count 1 \
-  -timeout 3h \
+  -timeout 3h30m \
   -v \
   "$KARPENTER_CORE_DIR"/test/suites/$(echo "$TEST_SUITE" | tr A-Z a-z)/... \
   --ginkgo.focus="${FOCUS}" \
   --ginkgo.skip="${SKIP}" \
   --ginkgo.timeout=3h \
-  --ginkgo.grace-period=5m \
+  --ginkgo.grace-period=15m \
   --ginkgo.vv \
+  "${JUNIT_REPORT[@]}" \
   --default-nodeclass="$TMPFILE" \
   --default-nodepool="$DEFAULT_NODEPOOL"
