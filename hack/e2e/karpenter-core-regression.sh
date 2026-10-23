@@ -6,7 +6,8 @@ export HYPERSHIFT_NAMESPACE="$(<"${SHARED_DIR}/management_cluster_namespace")"
 
 # Clone karpenter core fork and vendor it
 dir=$(mktemp -d)
-git clone https://github.com/openshift/kubernetes-sigs-karpenter.git --depth=1 "$dir"
+KARPENTER_CORE_BRANCH=${KARPENTER_CORE_BRANCH:-main}
+git clone https://github.com/openshift/kubernetes-sigs-karpenter.git --depth=1 --branch "$KARPENTER_CORE_BRANCH" "$dir"
 go -C "$dir" mod vendor
 
 # Annotate HCP on management cluster to enable e2e override
