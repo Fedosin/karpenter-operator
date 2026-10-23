@@ -15,8 +15,6 @@ oc annotate -n "${HYPERSHIFT_NAMESPACE}-${CLUSTER}" "hcp/${CLUSTER}" hypershift.
 
 # Switch to guest cluster
 export KUBECONFIG=${SHARED_DIR}/nested_kubeconfig
-oc apply -f pkg/assets/crds/karpenter.sh_nodeoverlays.yaml
-oc delete validatingadmissionpolicybindings.admissionregistration.k8s.io karpenter-binding.ec2nodeclass.hypershift.io
 
 # TODO: Enable additional Karpenter core regression suites as HyperShift support is added.
 # For now, scope this job to the Performance suite.
