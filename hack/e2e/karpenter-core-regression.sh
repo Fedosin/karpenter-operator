@@ -18,4 +18,12 @@ export KUBECONFIG=${SHARED_DIR}/nested_kubeconfig
 oc apply -f pkg/assets/crds/karpenter.sh_nodeoverlays.yaml
 oc delete validatingadmissionpolicybindings.admissionregistration.k8s.io karpenter-binding.ec2nodeclass.hypershift.io
 
-KARPENTER_CORE_DIR=$dir SKIP="StaticCapacity" TEST_SUITE=regression ./hack/e2e/upstream-e2e.sh
+# TODO: Enable additional Karpenter core regression suites as HyperShift support is added.
+# For now, scope this job to the Performance suite.
+
+KARPENTER_CORE_DIR=$dir \
+KARPENTER_E2E_PERFORMANCE_REPLICAS=20 \
+FOCUS="Performance" \
+SKIP="StaticCapacity" \
+TEST_SUITE=regression \
+./hack/e2e/upstream-e2e.sh
